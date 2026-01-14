@@ -4,7 +4,10 @@ import zipfile
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.pdf_text import extract_text_from_pdf_bytes
+# IMAGE-ONLY: OCR text extraction + image highlighter
+from src.image_text import extract_text_from_image_bytes
+from src.image_highlighter import annotate_image_bytes
+
 from src.metadata import (
     autodetect_metadata,
     make_csv_template,
@@ -12,15 +15,14 @@ from src.metadata import (
     merge_metadata,
 )
 from src.openai_terms import suggest_ovisa_quotes
-from src.pdf_highlighter import annotate_pdf_bytes
 from src.prompts import CRITERIA
 
 load_dotenv()
-st.set_page_config(page_title="O-1 PDF Highlighter", layout="wide")
+st.set_page_config(page_title="O-1 Image Highlighter", layout="wide")
 
-st.title("O-1 PDF Highlighter")
+st.title("O-1 Image Highlighter")
 st.caption(
-    "Upload PDFs → choose criteria → approve/reject quotes → export criterion-specific highlighted PDFs"
+    "Upload images (PNG/JPG) → choose criteria → approve/reject quotes → export criterion-specific highlighted PDFs"
 )
 
 # -------------------------
@@ -44,13 +46,13 @@ with st.sidebar:
     st.caption("Tip: Tick only the criteria you want to build evidence for in this batch.")
 
 uploaded_files = st.file_uploader(
-    "Upload one or more PDF files",
-    type=["pdf"],
+    "Upload one or more image files (PNG/JPG)",
+    type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
     accept_multiple_files=True,
 )
 
 if not uploaded_files:
-    st.info("Upload at least one PDF to begin.")
+    st.info("Upload at least one image to begin.")
     st.stop()
 
 if not beneficiary_name.strip():
@@ -86,9 +88,9 @@ if "regen_user_feedback" not in st.session_state:
 
 
 # -------------------------
-# Metadata: AI across all pages + per-file overrides + optional CSV for bulk
+# Metadata: OCR across the image + per-file overrides + optional CSV for bulk
 # -------------------------
-st.subheader("🧾 Metadata (AI-detected, override if needed)")
+st.subheader("🧾 Metadata (AI-detected from OCR, override if needed)")
 
 csv_data = None
 if len(uploaded_files) > 1:
@@ -114,7 +116,7 @@ if len(uploaded_files) > 1:
             try:
                 st.session_state["csv_metadata"] = parse_metadata_csv(csv_file.getvalue())
                 applied = len([fn for fn in filenames if fn in st.session_state["csv_metadata"]])
-                st.success(f"CSV loaded. Rows matched to {applied}/{len(filenames)} uploaded PDFs.")
+                st.success(f"CSV loaded. Rows matched to {applied}/{len(filenames)} uploaded images.")
             except Exception as e:
                 st.session_state["csv_metadata"] = None
                 st.error(f"Could not parse CSV: {e}")
@@ -123,7 +125,7 @@ if len(uploaded_files) > 1:
 
 # Compute & show AI metadata per file, then allow override
 for f in uploaded_files:
-    full_text = extract_text_from_pdf_bytes(f.getvalue())
+    full_text = extract_text_from_image_bytes(f.getvalue())
 
     # AI autodetect is the default base
     try:
@@ -184,7 +186,7 @@ st.subheader("1️⃣ Generate criterion-tagged quote candidates (AI)")
 
 colA, colB = st.columns([1, 1])
 with colA:
-    run_ai = st.button("Generate for all PDFs", type="primary")
+    run_ai = st.button("Generate for all images", type="primary")
 with colB:
     clear = st.button("Clear results")
 
@@ -194,9 +196,9 @@ if clear:
     st.success("Cleared AI results and approvals.")
 
 if run_ai:
-    with st.spinner("Reading PDFs and generating quote candidates…"):
+    with st.spinner("Reading images (OCR) and generating quote candidates…"):
         for f in uploaded_files:
-            text = extract_text_from_pdf_bytes(f.getvalue())
+            text = extract_text_from_image_bytes(f.getvalue())
             data = suggest_ovisa_quotes(
                 document_text=text,
                 beneficiary_name=beneficiary_name,
@@ -218,16 +220,16 @@ if run_ai:
 st.divider()
 
 # -------------------------
-# Step 2: Approve/Reject (per PDF, per criterion)
+# Step 2: Approve/Reject (per file, per criterion)
 # -------------------------
 st.subheader("2️⃣ Approve / Reject quotes by criterion")
 
 for f in uploaded_files:
-    st.markdown(f"## 📄 {f.name}")
+    st.markdown(f"## 🖼️ {f.name}")
 
     data = st.session_state["ai_by_file"].get(f.name)
     if not data:
-        st.info("No AI results yet for this PDF. Click “Generate for all PDFs”.")
+        st.info("No AI results yet for this image. Click “Generate for all images”.")
         continue
 
     notes = data.get("notes", "")
@@ -237,7 +239,6 @@ for f in uploaded_files:
 
     by_criterion = data.get("by_criterion", {})
 
-    # NEW: user feedback box (this replaces the app “telling itself” feedback)
     uf_key = f"user_feedback_{f.name}"
     st.session_state["regen_user_feedback"].setdefault(f.name, "")
     user_feedback = st.text_area(
@@ -268,7 +269,7 @@ for f in uploaded_files:
         }
 
         with st.spinner("Regenerating with your feedback…"):
-            text = extract_text_from_pdf_bytes(f.getvalue())
+            text = extract_text_from_image_bytes(f.getvalue())
             new_data = suggest_ovisa_quotes(
                 document_text=text,
                 beneficiary_name=beneficiary_name,
@@ -335,7 +336,7 @@ st.divider()
 st.subheader("3️⃣ Export highlighted PDFs by criterion")
 
 
-def build_annotated_pdf_bytes(pdf_bytes: bytes, quotes: list[str], criterion_id: str, filename: str):
+def build_annotated_pdf_bytes(image_bytes: bytes, quotes: list[str], criterion_id: str, filename: str):
     resolved = st.session_state["meta_by_file"].get(filename, {}) or {}
 
     meta = {
@@ -347,10 +348,10 @@ def build_annotated_pdf_bytes(pdf_bytes: bytes, quotes: list[str], criterion_id:
         "beneficiary_variants": beneficiary_variants,
     }
 
-    return annotate_pdf_bytes(pdf_bytes, quotes, criterion_id=criterion_id, meta=meta)
+    return annotate_image_bytes(image_bytes, quotes, criterion_id=criterion_id, meta=meta)
 
 
-zip_btn = st.button("Export ALL selected criteria as ZIP (all PDFs)", type="primary")
+zip_btn = st.button("Export ALL selected criteria as ZIP (all images)", type="primary")
 
 zip_buffer = None
 if zip_btn:
@@ -360,6 +361,7 @@ if zip_btn:
             data = st.session_state["ai_by_file"].get(f.name)
             if not data:
                 continue
+            base = f.name.rsplit(".", 1)[0]
             for cid in selected_criteria_ids:
                 approvals = st.session_state["approval"].get(f.name, {}).get(cid, {})
                 approved_quotes = [q for q, ok in approvals.items() if ok]
@@ -372,7 +374,7 @@ if zip_btn:
                     cid,
                     filename=f.name,
                 )
-                out_name = f.name.replace(".pdf", f"_criterion-{cid}_highlighted.pdf")
+                out_name = f"{base}_criterion-{cid}_highlighted.pdf"
                 zf.writestr(out_name, out_bytes)
 
     zip_buffer.seek(0)
@@ -385,14 +387,15 @@ if zip_buffer:
         mime="application/zip",
     )
 
-st.caption("You can also export per PDF/per criterion below:")
+st.caption("You can also export per image/per criterion below:")
 
 for f in uploaded_files:
     data = st.session_state["ai_by_file"].get(f.name)
     if not data:
         continue
 
-    st.markdown(f"### 📄 {f.name}")
+    st.markdown(f"### 🖼️ {f.name}")
+    base = f.name.rsplit(".", 1)[0]
 
     for cid in selected_criteria_ids:
         approvals = st.session_state["approval"].get(f.name, {}).get(cid, {})
@@ -409,7 +412,7 @@ for f in uploaded_files:
                     filename=f.name,
                 )
 
-            out_name = f.name.replace(".pdf", f"_criterion-{cid}_highlighted.pdf")
+            out_name = f"{base}_criterion-{cid}_highlighted.pdf"
 
             st.success(
                 f"Created {out_name} — quotes: {report.get('total_quote_hits', 0)} | meta: {report.get('total_meta_hits', 0)}"
@@ -424,4 +427,4 @@ for f in uploaded_files:
             )
 
 st.divider()
-st.caption("O-1 PDF Highlighter • Criterion-based extraction + approval workflow + per-criterion exports")
+st.caption("O-1 Image Highlighter • Criterion-based extraction + approval workflow + per-criterion exports")
