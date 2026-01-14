@@ -1,0 +1,4 @@
+streamlit>=1.33
+pymupdf>=1.23
+openai>=1.40.0
+python-dotenv>=1.0.1
